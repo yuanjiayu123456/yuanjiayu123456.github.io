@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Academic Research Group Website">
+    <title>Research Group - Academic Website</title>
+    
+    <style>
+        /* ============================================
+           GLOBAL STYLES
+           ============================================ */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f8f9fa;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        
+        /* ============================================
+           HEADER & NAVIGATION
+           ============================================ */
+        header {
+            background-color: #2c3e50;
+            color: white;
+            padding: 1rem 0;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        nav .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+        
+        nav ul {
+            list-style: none;
+            display: flex;
+            gap: 2rem;
+        }
+        
+        nav a {
+            color: white;
+            text-decoration: none;
+            transition: color 0.3s ease;
+        }
+        
+        nav a:hover {
+            color: #3498db;
+        }
+        
+        /* ============================================
+           SECTIONS
+           ============================================ */
+        section {
+            padding: 4rem 0;
+            background-color: white;
+            margin-bottom: 2rem;
+        }
+        
+        section:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        
+        section h2 {
+            color: #2c3e50;
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+            text-align: center;
+            position: relative;
+            padding-bottom: 1rem;
+        }
+        
+        section h2::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 80px;
+            height: 3px;
+            background-color: #3498db;
+        }
+        
+        /* ============================================
+           HOME/HERO SECTION
+           ============================================ */
+        #home {
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            text-align: center;
+            padding: 6rem 0;
+            margin-bottom: 0;
+        }
+        
+        #home h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        #home p {
+            font-size: 1.3rem;
+            max-width: 800px;
+            margin: 0 auto;
+            line-height: 1.8;
+        }
+        
+        /* ============================================
+           NEWS SECTION
+           ============================================ */
+        .news-item {
+            background-color: white;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border-left: 4px solid #3498db;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .news-item:hover {
+            transform: translateX(5px);
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+        
+        .news-item .date {
+            color: #7f8c8d;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .news-item h3 {
+            color: #2c3e50;
+            margin-bottom: 0.5rem;
+        }
+        
+        /* ============================================
+           MEMBERS SECTION
+           ============================================ */
+        .member-category {
+            margin-bottom: 3rem;
+        }
+        
+        .member-category h3 {
+            color: #2c3e50;
+            font-size: 1.8rem;
+            margin-bottom: 1.5rem;
+            padding-left: 1rem;
+            border-left: 4px solid #3498db;
+        }
+        
+        .members-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+        
+        .member-card {
+            background-color: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            text-align: center;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .member-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.15);
+        }
+        
+        .member-card .member-photo {
+            width: 150px;
+            height: 150px;
+            border-radius: 50%;
+            background-color: #ecf0f1;
+            margin: 0 auto 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3rem;
+            color: #95a5a6;
+        }
+        
+        .member-card h4 {
+            color: #2c3e50;
+            margin-bottom: 0.5rem;
+            font-size: 1.2rem;
+        }
+        
+        .member-card .role {
+            color: #7f8c8d;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .member-card p {
+            font-size: 0.95rem;
+            color: #555;
+        }
+        
+        /* ============================================
+           PUBLICATIONS SECTION
+           ============================================ */
+        .publication {
+            background-color: white;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            transition: box-shadow 0.3s ease;
+        }
+        
+        .publication:hover {
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        
+        .publication .pub-title {
+            color: #2c3e50;
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+        
+        .publication .pub-authors {
+            color: #555;
+            margin-bottom: 0.3rem;
+        }
+        
+        .publication .pub-venue {
+            color: #7f8c8d;
+            font-style: italic;
+            margin-bottom: 0.5rem;
+        }
+        
+        .publication .pub-links {
+            margin-top: 0.8rem;
+        }
+        
+        .publication .pub-links a {
+            display: inline-block;
+            padding: 0.4rem 1rem;
+            background-color: #3498db;
+            color: white;
+            text-decoration: none;
+            border-radius: 3px;
+            margin-right: 0.5rem;
+            font-size: 0.9rem;
+            transition: background-color 0.3s ease;
+        }
+        
+        .publication .pub-links a:hover {
+            background-color: #2980b9;
+        }
+        
+        /* ============================================
+           FOOTER
+           ============================================ */
+        footer {
+            background-color: #2c3e50;
+            color: white;
+            text-align: center;
+            padding: 2rem 0;
+        }
+        
+        footer p {
+            margin-bottom: 0.5rem;
+        }
+        
+        footer a {
+            color: #3498db;
+            text-decoration: none;
+        }
+        
+        footer a:hover {
+            text-decoration: underline;
+        }
+        
+        /* ============================================
+           RESPONSIVE DESIGN
+           ============================================ */
+        @media (max-width: 768px) {
+            nav {
+                flex-direction: column;
+                gap: 1rem;
+            }
+            
+            nav ul {
+                flex-wrap: wrap;
+                justify-content: center;
+                gap: 1rem;
+            }
+            
+            #home h1 {
+                font-size: 2rem;
+            }
+            
+            #home p {
+                font-size: 1.1rem;
+            }
+            
+            section h2 {
+                font-size: 2rem;
+            }
+            
+            .members-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- ============================================
+         HEADER SECTION
+         Edit the navigation links and logo text below
+         ============================================ -->
+    <header>
+        <div class="container">
+            <nav>
+                <div class="logo">Research Group</div>
+                <ul>
+                    <li><a href="#home">Home</a></li>
+                    <li><a href="#news">News</a></li>
+                    <li><a href="#members">Members</a></li>
+                    <li><a href="#publications">Publications</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <!-- ============================================
+         HOME SECTION
+         Edit the group name (h1) and introduction text (p) below
+         ============================================ -->
+    <section id="home">
+        <div class="container">
+            <h1>Welcome to Our Research Group</h1>
+            <p>
+                We are a dynamic research group dedicated to advancing knowledge in our field 
+                through innovative research, collaboration, and education. Our work focuses on 
+                cutting-edge problems that have real-world impact and contribute to scientific understanding.
+            </p>
+        </div>
+    </section>
+
+    <!-- ============================================
+         NEWS SECTION
+         To add/edit news items, copy the entire <div class="news-item">...</div> block
+         and update the date, title, and description
+         ============================================ -->
+    <section id="news">
+        <div class="container">
+            <h2>Latest News</h2>
+            
+            <!-- News Item 1 - Copy this entire block to add more news -->
+            <div class="news-item">
+                <div class="date">December 15, 2023</div>
+                <h3>New Paper Accepted</h3>
+                <p>Our latest research paper has been accepted to the prestigious International Conference. Congratulations to the team!</p>
+            </div>
+            
+            <!-- News Item 2 -->
+            <div class="news-item">
+                <div class="date">November 28, 2023</div>
+                <h3>Grant Award Received</h3>
+                <p>We are pleased to announce that our research proposal has been awarded funding from the National Science Foundation.</p>
+            </div>
+            
+            <!-- News Item 3 -->
+            <div class="news-item">
+                <div class="date">November 10, 2023</div>
+                <h3>New Team Member</h3>
+                <p>Welcome to our newest PhD student who joins us this fall semester. We're excited to have you on board!</p>
+            </div>
+            
+            <!-- News Item 4 -->
+            <div class="news-item">
+                <div class="date">October 22, 2023</div>
+                <h3>Workshop Presentation</h3>
+                <p>Our group will be presenting at the upcoming International Workshop on Advanced Research Topics.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================
+         MEMBERS SECTION
+         To add/edit members:
+         1. Find the appropriate category (PI, PhD, or Master)
+         2. Copy a <div class="member-card">...</div> block
+         3. Update the name, role, and description
+         4. The emoji in the photo div can be changed (e.g., 👤, 👨, 👩, 🧑)
+         ============================================ -->
+    <section id="members">
+        <div class="container">
+            <h2>Our Team</h2>
+            
+            <!-- Principal Investigator Category -->
+            <div class="member-category">
+                <h3>Principal Investigator</h3>
+                <div class="members-grid">
+                    <!-- PI Member Card - Edit name and description -->
+                    <div class="member-card">
+                        <div class="member-photo">👤</div>
+                        <h4>Dr. Jane Smith</h4>
+                        <div class="role">Professor & Group Leader</div>
+                        <p>Research interests: Machine Learning, Data Science, Artificial Intelligence</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- PhD Students Category -->
+            <div class="member-category">
+                <h3>PhD Students</h3>
+                <div class="members-grid">
+                    <!-- PhD Student 1 - Copy this block to add more PhD students -->
+                    <div class="member-card">
+                        <div class="member-photo">👨</div>
+                        <h4>John Doe</h4>
+                        <div class="role">PhD Candidate</div>
+                        <p>Research focus: Deep Learning and Computer Vision</p>
+                    </div>
+                    
+                    <!-- PhD Student 2 -->
+                    <div class="member-card">
+                        <div class="member-photo">👩</div>
+                        <h4>Emily Chen</h4>
+                        <div class="role">PhD Candidate</div>
+                        <p>Research focus: Natural Language Processing</p>
+                    </div>
+                    
+                    <!-- PhD Student 3 -->
+                    <div class="member-card">
+                        <div class="member-photo">🧑</div>
+                        <h4>Michael Johnson</h4>
+                        <div class="role">PhD Student</div>
+                        <p>Research focus: Reinforcement Learning and Robotics</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Master Students Category -->
+            <div class="member-category">
+                <h3>Master Students</h3>
+                <div class="members-grid">
+                    <!-- Master Student 1 - Copy this block to add more Master students -->
+                    <div class="member-card">
+                        <div class="member-photo">👨</div>
+                        <h4>David Lee</h4>
+                        <div class="role">Master Student</div>
+                        <p>Research focus: Data Mining and Analytics</p>
+                    </div>
+                    
+                    <!-- Master Student 2 -->
+                    <div class="member-card">
+                        <div class="member-photo">👩</div>
+                        <h4>Sarah Williams</h4>
+                        <div class="role">Master Student</div>
+                        <p>Research focus: Bioinformatics and Computational Biology</p>
+                    </div>
+                    
+                    <!-- Master Student 3 -->
+                    <div class="member-card">
+                        <div class="member-photo">🧑</div>
+                        <h4>Alex Thompson</h4>
+                        <div class="role">Master Student</div>
+                        <p>Research focus: Algorithm Design and Optimization</p>
+                    </div>
+                    
+                    <!-- Master Student 4 -->
+                    <div class="member-card">
+                        <div class="member-photo">👤</div>
+                        <h4>Maria Garcia</h4>
+                        <div class="role">Master Student</div>
+                        <p>Research focus: Human-Computer Interaction</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================
+         PUBLICATIONS SECTION
+         To add/edit publications:
+         1. Copy a <div class="publication">...</div> block
+         2. Update the title, authors, venue, and year
+         3. Update the links (href="#") with actual URLs or remove if not available
+         ============================================ -->
+    <section id="publications">
+        <div class="container">
+            <h2>Selected Publications</h2>
+            
+            <!-- Publication 1 - Copy this entire block to add more publications -->
+            <div class="publication">
+                <div class="pub-title">
+                    Advances in Deep Learning for Computer Vision Applications
+                </div>
+                <div class="pub-authors">
+                    J. Doe, E. Chen, and J. Smith
+                </div>
+                <div class="pub-venue">
+                    International Conference on Computer Vision (ICCV), 2023
+                </div>
+                <div class="pub-links">
+                    <a href="#" target="_blank">PDF</a>
+                    <a href="#" target="_blank">Code</a>
+                    <a href="#" target="_blank">BibTeX</a>
+                </div>
+            </div>
+            
+            <!-- Publication 2 -->
+            <div class="publication">
+                <div class="pub-title">
+                    Natural Language Understanding through Transformer Models
+                </div>
+                <div class="pub-authors">
+                    E. Chen, M. Johnson, and J. Smith
+                </div>
+                <div class="pub-venue">
+                    Annual Meeting of the Association for Computational Linguistics (ACL), 2023
+                </div>
+                <div class="pub-links">
+                    <a href="#" target="_blank">PDF</a>
+                    <a href="#" target="_blank">Code</a>
+                    <a href="#" target="_blank">BibTeX</a>
+                </div>
+            </div>
+            
+            <!-- Publication 3 -->
+            <div class="publication">
+                <div class="pub-title">
+                    Reinforcement Learning for Autonomous Systems: A Survey
+                </div>
+                <div class="pub-authors">
+                    M. Johnson, D. Lee, and J. Smith
+                </div>
+                <div class="pub-venue">
+                    IEEE Transactions on Robotics, vol. 39, no. 2, pp. 123-145, 2023
+                </div>
+                <div class="pub-links">
+                    <a href="#" target="_blank">PDF</a>
+                    <a href="#" target="_blank">BibTeX</a>
+                </div>
+            </div>
+            
+            <!-- Publication 4 -->
+            <div class="publication">
+                <div class="pub-title">
+                    Data-Driven Approaches for Bioinformatics Analysis
+                </div>
+                <div class="pub-authors">
+                    S. Williams, A. Thompson, and J. Smith
+                </div>
+                <div class="pub-venue">
+                    Bioinformatics, vol. 38, no. 15, pp. 3210-3225, 2022
+                </div>
+                <div class="pub-links">
+                    <a href="#" target="_blank">PDF</a>
+                    <a href="#" target="_blank">Code</a>
+                </div>
+            </div>
+            
+            <!-- Publication 5 -->
+            <div class="publication">
+                <div class="pub-title">
+                    Optimization Algorithms for Large-Scale Machine Learning
+                </div>
+                <div class="pub-authors">
+                    A. Thompson, J. Doe, and J. Smith
+                </div>
+                <div class="pub-venue">
+                    Journal of Machine Learning Research, vol. 23, pp. 1-48, 2022
+                </div>
+                <div class="pub-links">
+                    <a href="#" target="_blank">PDF</a>
+                    <a href="#" target="_blank">Code</a>
+                    <a href="#" target="_blank">BibTeX</a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================
+         FOOTER SECTION
+         Edit the copyright year, group name, and contact information below
+         ============================================ -->
+    <footer>
+        <div class="container">
+            <p>&copy; 2023 Research Group. All rights reserved.</p>
+            <p>Contact: <a href="mailto:contact@researchgroup.edu">contact@researchgroup.edu</a></p>
+            <p>Address: Department of Computer Science, University Name, City, Country</p>
+        </div>
+    </footer>
+</body>
+</html>

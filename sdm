@@ -1,0 +1,271 @@
+# -*- coding: utf-8 -*-
+"""
+STEP 1 (Final Refined): SDM 信号源 - 修正调制逻辑版
+改动点：
+1. 仅修改 generate_custom_protocol 函数。
+2. 实现 Load Modulation 逻辑 (1=Low, 0=High)。
+3. 加入 Preamble (0101...) 唤醒 HPF。
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import signal
+import os
+
+# 检查目录
+if not os.path.exists('data'): os.makedirs('data')
+if not os.path.exists('output'): os.makedirs('output')
+
+# ================= 配置区域 =================
+CONFIG = {
+    'fs': 16e6,              # 采样率 16MHz
+    'duration': 0.08,        # 仿真时长 80ms
+    'carrier_freq': 125000,  # 载波 125kHz
+    
+    # 调制深度配置
+    # 建议先用 1/2000 跑通，之后再改 1/50000
+    'mod_depth': 1/2000,     
+    'base_amp': 0.5,         # 载波基准幅度 (500V -> 0.5归一化)
+    
+    'chip_period': 32e-6,    # 1 Chip = 32us
+    
+    'snr_db': 140,           # 注入噪声信噪比
+    
+    # 分析参数
+    'view_bw': [0, 250000],
+    'signal_bw': [120000, 130000],
+    'total_bw': [110000, 140000],
+    
+    'out_pdm': 'data/data_pdm.dat',
+    'out_ref': 'data/data_ref.dat',
+    'plot_file': 'output/sdm_analysis.png'
+}
+
+ORIGINAL_G_RES = [0.0078, 0.0117, 0.0259]
+
+class CTSDM_Model:
+    """连续时间 Sigma-Delta 调制器模型"""
+    def __init__(self, fs=16e6, osr=10, g_res_scale=1.0):
+        self.fs = fs
+        self.ts = 1/fs
+        self.sub_steps = osr  
+        self.dt = self.ts / self.sub_steps
+        self.k_int = 8e6 
+        self.g_in, self.g_dac = 0.1339, 0.1337
+        
+        # 缩放 g_res 以移动陷波点到 125kHz
+        self.g_res1 = ORIGINAL_G_RES[0] * g_res_scale
+        self.g_res2 = ORIGINAL_G_RES[1] * g_res_scale
+        self.g_res3 = ORIGINAL_G_RES[2] * g_res_scale
+        
+        self.a = [0.2713, 0.2345, 0.1981, 0.1303, 0.0903]
+        self.c = [5.1539, 6.6828, 6.7732, 5.2973, 4.2352, 1.7112]
+        self.g_eld = 0.3686
+        self.reset()
+
+    def reset(self):
+        self.x = np.zeros(6)
+        self.delay_reg = -1.0 
+
+    def step(self, u_current):
+        v_applied = self.delay_reg
+        for _ in range(self.sub_steps):
+            x = self.x
+            dx0 = self.k_int * (u_current * self.g_in - v_applied * self.g_dac - x[1] * self.g_res1)
+            dx1 = self.k_int * (x[0] * self.a[0])
+            dx2 = self.k_int * (x[1] * self.a[1] - x[3] * self.g_res2)
+            dx3 = self.k_int * (x[2] * self.a[2])
+            dx4 = self.k_int * (x[3] * self.a[3] - x[5] * self.g_res3)
+            dx5 = self.k_int * (x[4] * self.a[4])
+            self.x += np.array([dx0, dx1, dx2, dx3, dx4, dx5]) * self.dt
+        y_sum = np.dot(self.x, self.c) - v_applied * self.g_eld
+        q_out = 1.0 if y_sum >= 0 else -1.0
+        self.delay_reg = q_out 
+        return q_out
+
+    def calc_ntf_response(self, freqs):
+        """计算理论 NTF 曲线用于绘图"""
+        s = 1j * 2 * np.pi * freqs
+        k = self.k_int
+        A = np.zeros((6, 6))
+        A[0, 1] = -k * self.g_res1; A[1, 0] = k * self.a[0]
+        A[2, 1] = k * self.a[1];    A[2, 3] = -k * self.g_res2
+        A[3, 2] = k * self.a[2]
+        A[4, 3] = k * self.a[3];    A[4, 5] = -k * self.g_res3
+        A[5, 4] = k * self.a[4]
+        B_dac = np.zeros((6, 1)); B_dac[0] = -k * self.g_dac
+        C = np.array(self.c).reshape(1, 6)
+        I = np.eye(6)
+        ntf_mag_db = []
+        for f_val in freqs:
+            try:
+                resolvent = np.linalg.inv(1j * 2 * np.pi * f_val * I - A)
+                L_total = (C @ resolvent @ B_dac)[0,0] - self.g_eld
+                ntf_mag_db.append(20 * np.log10(np.abs(1 / (1 + L_total))))
+            except:
+                ntf_mag_db.append(0)
+        return np.array(ntf_mag_db)
+
+def generate_custom_protocol(t, fs, carrier_freq, amp_high, amp_low, chip_period):
+    """
+    生成自定义协议波形 (Load Modulation Logic)
+    逻辑反转: 1 -> AmpLow, 0 -> AmpHigh
+    """
+    # 1. 定义 Chip 序列 (1=ModulationOn=Low, 0=ModulationOff=High)
+    
+    # [新增] Preamble: 0101 交替 (8 chips)
+    # 物理意义: High-Low-High-Low... 用于产生交流分量唤醒 HPF
+    seq_preamble = np.array([0, 1, 0, 1, 0, 1, 0, 1])
+    
+    # EQ (违例码): 11个1，1个0
+    # 物理意义: 11个 Low (长低电平), 1个 High
+    seq_eq = np.array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0]) 
+    
+    # Data 1: 11110000 -> Low*4, High*4
+    seq_data_1 = np.array([1, 1, 1, 1, 0, 0, 0, 0])        
+    
+    # Data 0: 00001111 -> High*4, Low*4
+    seq_data_0 = np.array([0, 0, 0, 0, 1, 1, 1, 1])        
+    
+    # 2. 构造完整的 Chip 列表
+    total_time = t[-1]
+    idle_time = 0.002 # 2ms 静默
+    
+    # 计算 Payload 能放多少 bit
+    remaining_time = total_time - idle_time - ((len(seq_preamble) + len(seq_eq)) * chip_period)
+    num_bits = int(remaining_time / (8 * chip_period))
+    
+    print(f"📦 协议构造: 1 Chip = {chip_period*1e6:.1f}us")
+    print(f"   Structure: [Preamble 8] + [EQ {len(seq_eq)}] + [Payload {num_bits} bits]")
+    
+    np.random.seed(42)
+    random_bits = np.random.randint(0, 2, num_bits)
+    
+    # 拼接序列
+    full_chip_sequence = []
+    full_chip_sequence.extend(seq_preamble) # [新增]
+    full_chip_sequence.extend(seq_eq)       # Header
+    for b in random_bits:                   # Body
+        if b == 1: full_chip_sequence.extend(seq_data_1)
+        else:      full_chip_sequence.extend(seq_data_0)
+        
+    full_chip_sequence = np.array(full_chip_sequence)
+    
+    # 3. 映射到时间轴 (Upsampling)
+    # 默认全高 (Idle状态 = 无负载 = AmpHigh)
+    envelope = np.ones(len(t)) * amp_high
+    
+    idle_samples = int(idle_time * fs)
+    samples_per_chip = int(chip_period * fs)
+    
+    current_idx = idle_samples
+    for chip_val in full_chip_sequence:
+        end_idx = current_idx + samples_per_chip
+        if end_idx > len(t): break
+        
+        # [关键修改] 逻辑反转映射
+        # chip_val=1 (Modulation On) -> AmpLow
+        # chip_val=0 (Modulation Off) -> AmpHigh
+        val = amp_low if chip_val == 1 else amp_high
+        
+        envelope[current_idx : end_idx] = val
+        current_idx = end_idx
+        
+    # 4. 载波调制
+    carrier = np.sin(2 * np.pi * carrier_freq * t)
+    return carrier * envelope
+
+def main():
+    # 1. 计算调谐系数 (将陷波点移到 125k)
+    target_f = 125000; current_f = 60500 
+    scale_factor = (target_f / current_f) ** 2
+    print(f"🔧 SDM 系数修正: g_res 缩放 {scale_factor:.4f} 倍")
+    
+    # 2. 计算幅度参数
+    amp_h = CONFIG['base_amp']
+    amp_l = CONFIG['base_amp'] * (1 - CONFIG['mod_depth'])
+    print(f"⚡ 信号幅度: High={amp_h}, Low={amp_l} (Depth={CONFIG['mod_depth']:.5f})")
+    
+    # 3. 生成信号
+    N = int(CONFIG['duration'] * CONFIG['fs'])
+    t = np.arange(N) / CONFIG['fs']
+    
+    sig = generate_custom_protocol(
+        t, CONFIG['fs'], CONFIG['carrier_freq'],
+        amp_h, amp_l, CONFIG['chip_period']
+    )
+    
+    # 加一点噪声 (可选)
+    noise_p = np.mean(sig**2) / (10**(CONFIG['snr_db']/10))
+    sig_noisy = sig + np.random.normal(0, np.sqrt(noise_p), N)
+    
+    # 4. 运行 SDM
+    print("🚀 运行 SDM 仿真 (Load Modulation Logic)...")
+    sdm = CTSDM_Model(fs=CONFIG['fs'], g_res_scale=scale_factor)
+    pdm = np.zeros(N)
+    for i in range(N):
+        pdm[i] = 1 if sdm.step(sig_noisy[i]) > 0 else -1
+
+    # 5. 保存数据
+    np.savetxt(CONFIG['out_pdm'], pdm, fmt='%d')
+    np.savetxt(CONFIG['out_ref'], sig, fmt='%.8f')
+    print(f"💾 数据已保存至 data/ 目录")
+
+    # ================= 6. 频谱分析与绘图 =================
+    print("📊 正在生成频谱分析图...")
+    freqs, psd = signal.welch(pdm, CONFIG['fs'], nperseg=32768, scaling='density')
+    psd_db = 10 * np.log10(psd + 1e-20)
+    
+    # SINAD 计算
+    mask_signal = (freqs >= CONFIG['signal_bw'][0]) & (freqs <= CONFIG['signal_bw'][1])
+    mask_total = (freqs >= CONFIG['total_bw'][0]) & (freqs <= CONFIG['total_bw'][1])
+    p_signal = np.sum(psd[mask_signal])
+    p_noise = np.sum(psd[mask_total]) - p_signal
+    sinad = 10 * np.log10(p_signal / p_noise) if p_noise > 0 else 0
+    print(f"   -> 最终 SINAD: {sinad:.2f} dB")
+
+    # 计算理论 NTF
+    f_ntf = np.linspace(CONFIG['view_bw'][0], CONFIG['view_bw'][1], 1000)
+    ntf_db = sdm.calc_ntf_response(f_ntf)
+
+    # 绘图
+    plt.style.use('seaborn-v0_8-paper')
+    fig, ax1 = plt.subplots(figsize=(10, 6), dpi=150)
+    
+    # 绘制 PSD
+    ax1.plot(freqs/1000, psd_db, '#1f77b4', lw=0.8, alpha=0.8, label='Simulated PSD')
+    ax1.set_ylabel('PSD (dB/Hz)', color='#1f77b4', fontweight='bold')
+    ax1.tick_params(axis='y', labelcolor='#1f77b4')
+    ax1.set_xlabel('Frequency (kHz)')
+    ax1.set_xlim(0, 250)
+    ax1.set_ylim(-160, 10)
+    
+    # 标注区域
+    ax1.axvspan(120, 130, color='green', alpha=0.1, label='Signal BW')
+    ax1.axvspan(110, 140, color='gray', alpha=0.1, label='Total BW')
+    
+    # 绘制 NTF (双轴)
+    ax2 = ax1.twinx()
+    ax2.plot(f_ntf/1000, ntf_db, '#d62728', ls='--', lw=1.5, label='Theoretical NTF')
+    ax2.set_ylabel('NTF Gain (dB)', color='#d62728', fontweight='bold')
+    ax2.tick_params(axis='y', labelcolor='#d62728')
+    ax2.set_ylim(-140, 20)
+    
+    # 标注陷波点
+    notch_idx = signal.argrelextrema(ntf_db, np.less)[0]
+    for nf in f_ntf[notch_idx]:
+        ax2.axvline(x=nf/1000, color='#d62728', linestyle=':', alpha=0.4)
+    
+    plt.title(f"SDM Analysis (ModDepth={CONFIG['mod_depth']:.5f})\nSINAD: {sinad:.2f} dB")
+    
+    # 合并图例
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+    
+    plt.tight_layout()
+    plt.savefig(CONFIG['plot_file'])
+    print(f"💾 频谱图已保存: {CONFIG['plot_file']}")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,151 @@
+# -*- coding: utf-8 -*-
+"""
+STEP 6 (Final Refined): EQ_SYNC 同步模块 - 适配 Load Modulation
+修改点：
+1. 系数生成逻辑翻转：逻辑 '1' 对应物理 '负电压'，逻辑 '0' 对应物理 '正电压'。
+2. 架构保持与硬件图一致：Window -> MF -> Peak Find -> Slice Output。
+"""
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+CONFIG = {
+    'fs': 31250.0,
+    
+    # 违例码 (Violation Code): 11个1，1个0
+    # 注意：硬件图上写的是 '1111110' (7位)，但为了配合我们 SDM 生成的信号，
+    # 我们这里必须使用 SDM 里的 12位 定义。逻辑上是一样的。
+    'eq_pattern': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    
+    # start_index: 跳过 SDM 里的 Preamble (0101...) 和 HPF 瞬态
+    # Preamble 约 8 chips，加余量建议设为 80-100
+    'start_index': 80,  
+    
+    'search_len': 2000,
+    
+    'in_file': 'data/data_hpf_out.dat',
+    'out_file': 'data/data_sync_out.dat',
+    'plot_file': 'output/step6_eq_sync_final.png'
+}
+
+def float_to_fixed(val, total_bits, frac_bits, signed=True):
+    scaling = 1 << frac_bits
+    if signed:
+        max_val = (1 << (total_bits - 1)) - 1
+        min_val = -(1 << (total_bits - 1))
+    else:
+        max_val = (1 << total_bits) - 1
+        min_val = 0
+    int_val = int(round(val * scaling))
+    return max(min(int_val, max_val), min_val)
+
+def generate_mf_coeffs(pattern):
+    """
+    生成匹配滤波器系数 (适配 Load Modulation)
+    逻辑 1 (Mod On)  -> AmpLow  -> HPF负值 -> 系数取 -1.0
+    逻辑 0 (Mod Off) -> AmpHigh -> HPF正值 -> 系数取 +1.0
+    """
+    waveform = []
+    for chip in pattern:
+        # [关键修改] 极性翻转
+        val = -1.0 if chip == 1 else 1.0
+        waveform.append(val)
+        
+    # 匹配滤波器核心：时间反转 (Time Reversal)
+    # y[n] = x[n]*c[0] + x[n-1]*c[1]... 
+    # 要实现相关运算，系数必须是波形的翻转
+    coeffs = np.array(waveform)[::-1]
+    
+    # 归一化
+    return coeffs / len(coeffs)
+
+class MF_Hardware_Model:
+    """硬件 FIR 滤波器模型"""
+    def __init__(self, coeffs):
+        self.coeffs_int = [float_to_fixed(c, 16, 15, signed=True) for c in coeffs]
+        self.buffer = [0] * len(coeffs)
+
+    def process(self, x_float):
+        x_int = float_to_fixed(x_float, 20, 19, signed=True)
+        self.buffer.pop()
+        self.buffer.insert(0, x_int)
+        
+        acc = 0
+        for i in range(len(self.buffer)):
+            acc += self.buffer[i] * self.coeffs_int[i]
+            
+        out_int = acc >> 18
+        sat_max = (1 << 16) - 1
+        sat_min = -(1 << 16)
+        if out_int > sat_max: out_int = sat_max
+        elif out_int < sat_min: out_int = sat_min
+            
+        return out_int / (1 << 16)
+
+def main():
+    if not os.path.exists('data'): os.makedirs('data')
+    if not os.path.exists(CONFIG['in_file']): 
+        return
+
+    hpf_data = np.loadtxt(CONFIG['in_file'])
+    
+    # 1. 硬件模块: inputs[start:end]
+    start = CONFIG['start_index']
+    end = min(len(hpf_data), start + CONFIG['search_len'])
+    mf_input_slice = hpf_data[start:end]
+    
+    print(f"✂️ 搜索窗口: Index {start} -> {end}")
+
+    # 2. 硬件模块: MF (Matched Filter)
+    coeffs = generate_mf_coeffs(CONFIG['eq_pattern'])
+    mf = MF_Hardware_Model(coeffs)
+    
+    mf_out = []
+    for val in mf_input_slice:
+        mf_out.append(mf.process(val))
+    mf_out = np.array(mf_out)
+    
+    # 3. 硬件模块: find_index (寻找正峰值)
+    # 由于系数极性已经翻转，匹配时会出现正峰值
+    peak_rel_idx = np.argmax(mf_out) 
+    peak_val = mf_out[peak_rel_idx]
+    
+    # 计算绝对位置 (eq_index)
+    peak_abs_idx = start + peak_rel_idx
+    
+    print(f"✅ 同步锁定: AbsIndex={peak_abs_idx}, Value={peak_val:.6f}")
+    
+    # 4. 硬件模块: Output Bypass (根据 index 输出数据)
+    aligned_data = hpf_data[peak_abs_idx:]
+    np.savetxt(CONFIG['out_file'], aligned_data, fmt='%.8f')
+
+    # 绘图验证
+    plt.style.use('seaborn-v0_8-paper')
+    fig, ax = plt.subplots(3, 1, figsize=(10, 10), dpi=150)
+    
+    # 图1: 搜索窗口
+    ax[0].plot(hpf_data[:end+100], 'gray', alpha=0.5, label='HPF Output')
+    ax[0].axvspan(start, end, color='green', alpha=0.1, label='Search Window')
+    ax[0].set_title('Step 1: Window Setup (inputs[start:end])', fontweight='bold')
+    ax[0].legend()
+    
+    # 图2: MF 输出
+    ax[1].plot(np.arange(start, end), mf_out, '#d62728', label='MF Correlation')
+    ax[1].plot(peak_abs_idx, peak_val, 'x', color='black', markersize=10)
+    ax[1].set_title(f'Step 2: MF Output (Peak @ {peak_abs_idx})', fontweight='bold')
+    ax[1].legend()
+
+    # 图3: 同步后的数据 (验证数据部分)
+    # 预期: 数据1 (11110000) -> 物理: Low*4 High*4 -> HPF: 负*4 正*4
+    # 预期: 数据0 (00001111) -> 物理: High*4 Low*4 -> HPF: 正*4 负*4
+    view_len = min(200, len(aligned_data))
+    ax[2].plot(aligned_data[:view_len], '#1f77b4', lw=1.5, label='Synced Stream')
+    ax[2].set_title('Step 3: Output Stream (Should see Neg->Pos for Data 1)', fontweight='bold')
+    ax[2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(CONFIG['plot_file'])
+    print(f"💾 结果图已保存: {CONFIG['plot_file']}")
+
+if __name__ == "__main__":
+    main()

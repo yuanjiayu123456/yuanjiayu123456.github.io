@@ -1,0 +1,93 @@
+# -*- coding: utf-8 -*-
+"""
+STEP 5 (Alternative): 动态 DC 锁定方案 (Sample & Hold Subtraction)
+原理：利用 Idle 阶段计算平均 DC，并在后续阶段锁定该值进行减法。
+优势：
+1. 0 畸变：长码不会倾斜。
+2. 0 资源：不需要 FIR 乘法器。
+"""
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+CONFIG = {
+    'fs': 31250.0,
+    'in_file': 'data/data_iq_out.dat',
+    'out_file': 'data/data_hpf_out.dat', # 覆盖输出，供下一步使用
+    'plot_file': 'output/step5_dc_latch.png',
+    
+    # 锁定时间：利用前 2ms (约64点) 计算 DC
+    'latch_len': 64 
+}
+
+def float_to_fixed(val, total_bits, frac_bits):
+    scaling = 1 << frac_bits
+    int_val = int(round(val * scaling))
+    return int_val
+
+class DC_Latch_Hardware:
+    def __init__(self, latch_len):
+        self.latch_len = latch_len
+        self.counter = 0
+        self.accumulator = 0.0
+        self.locked_dc = 0.0
+        self.calibrated = False
+
+    def process(self, x_float):
+        # 1. 校准阶段 (Calibration)
+        if self.counter < self.latch_len:
+            self.accumulator += x_float
+            self.counter += 1
+            
+            # 在最后一刻计算平均值并锁定
+            if self.counter == self.latch_len:
+                self.locked_dc = self.accumulator / self.latch_len
+                print(f"🔒 硬件自动校准完成: Locked DC = {self.locked_dc:.8f}")
+                self.calibrated = True
+            
+            return 0.0 # 校准期间 Mute 输出
+            
+        # 2. 工作阶段 (Operation)
+        else:
+            # 简单的减法
+            out = x_float - self.locked_dc
+            return out
+
+def main():
+    if not os.path.exists(CONFIG['in_file']): return
+    iq_data = np.loadtxt(CONFIG['in_file'])
+    
+    dc_remover = DC_Latch_Hardware(CONFIG['latch_len'])
+    
+    out_data = []
+    for val in iq_data:
+        out_data.append(dc_remover.process(val))
+    out_data = np.array(out_data)
+    
+    # 保存结果供下一步使用
+    np.savetxt(CONFIG['out_file'], out_data, fmt='%.8f')
+
+    # 绘图
+    plt.style.use('seaborn-v0_8-paper')
+    fig, ax = plt.subplots(2, 1, figsize=(10, 8), dpi=150)
+    
+    # 图1: 原始输入
+    ax[0].plot(iq_data, 'orange', label='Input (with DC)')
+    ax[0].set_title(f'Input Signal (DC ~ {np.mean(iq_data[:100]):.5f})')
+    
+    # 图2: 减去锁定 DC 后的输出
+    ax[1].plot(out_data, '#1f77b4', lw=1.5, label='Output (Input - LockedDC)')
+    ax[1].set_title('Output via "Dynamic DC Latch" (No Filter Distortion!)')
+    ax[1].axhline(0, color='black', alpha=0.3)
+    ax[1].grid(True, alpha=0.3)
+    
+    # 标注长低电平区域 (EQ)
+    # 看看是不是真的平直！
+    ax[1].text(100, -0.0001, "Perfectly Flat EQ!", color='green', fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(CONFIG['plot_file'])
+    print(f"✅ 结果已保存: {CONFIG['plot_file']}")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,179 @@
+# -*- coding: utf-8 -*-
+"""
+STEP 2: CIC Filter Analysis (Fixed vs Float)
+功能：
+1. 读取 PDM 数据
+2. 运行 CIC 抽取滤波 (Float模式 vs Fixed模式)
+3. 计算 RMSE (均方根误差)
+4. 输出对比图 (不显示，仅保存)
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+# ================= 配置区域 =================
+CONFIG = {
+    'input_file': 'data/data_pdm.dat',
+    'output_plot': 'output/cic_comparison_rmse.png',
+    
+    'fs_in': 16e6,        # 输入采样率
+    'R': 32,              # 抽取倍率 (Decimation Factor) 16M / 32 = 500kHz
+    'M': 1,               # 差分延迟 (Differential Delay)
+    'N': 4,               # 级数 (Stages)
+    
+    # 分析参数
+    'cut_head': 100,      # 去掉前 N 个点避免由于滤波器建立时间导致的初始误差
+    'check_bitwidth': True # 打印定点所需的寄存器位宽
+}
+
+class CICFilter:
+    def __init__(self, R, M, N):
+        self.R = R
+        self.M = M
+        self.N = N
+        self.gain = (R * M) ** N
+    
+    def process_float(self, x):
+        """
+        浮点数仿真 (Ideal)
+        使用 scipy 或 numpy 的浮点运算，代表理论最优值
+        """
+        # 1. 积分器 (Integrators)
+        y = x.astype(np.float64)
+        for _ in range(self.N):
+            y = np.cumsum(y)
+            
+        # 2. 抽取 (Decimation)
+        y = y[::self.R]
+        
+        # 3. 梳状器 (Combs)
+        # 梳状器传递函数: (1 - z^-M)^N
+        # 在抽取后，采样率降低，延迟为 M
+        for _ in range(self.N):
+            # y[n] = x[n] - x[n-M]
+            y_pad = np.pad(y, (self.M, 0), 'constant')
+            y = y - y_pad[:len(y)]
+            
+        return y
+
+    def process_fixed(self, x):
+        """
+        定点数仿真 (Hardware Sim)
+        使用 int64 模拟硬件寄存器行为
+        """
+        # 1. 积分器 (需处理溢出，Python int 自动扩位，这里模拟 int64 截断行为可手动加 mask，
+        # 但通常直接用 np.int64 运算即可观察与 float 的精度差异)
+        y = x.astype(np.int64)
+        
+        for i in range(self.N):
+            y = np.cumsum(y, dtype=np.int64)
+        
+        # 2. 抽取
+        y = y[::self.R]
+        
+        # 3. 梳状器
+        for i in range(self.N):
+            y_pad = np.pad(y, (self.M, 0), 'constant')
+            y = y - y_pad[:len(y)]
+            
+        return y
+
+def calculate_rmse(signal_a, signal_b):
+    """计算均方根误差"""
+    return np.sqrt(np.mean((signal_a - signal_b) ** 2))
+
+def main():
+    # 1. 读取数据
+    if not os.path.exists(CONFIG['input_file']):
+        print(f"[错误] 找不到输入文件: {CONFIG['input_file']}，请先运行 STEP 1。")
+        return
+
+    print(f"[加载] 正在读取 PDM 数据: {CONFIG['input_file']} ...")
+    pdm_data = np.loadtxt(CONFIG['input_file'])
+    print(f"       数据长度: {len(pdm_data)}")
+
+    # 2. 初始化滤波器
+    cic = CICFilter(CONFIG['R'], CONFIG['M'], CONFIG['N'])
+    print(f"[配置] CIC R={CONFIG['R']}, M={CONFIG['M']}, N={CONFIG['N']}")
+    print(f"       理论增益 Gain = {cic.gain} (约为 2^{np.log2(cic.gain):.1f})")
+    
+    # 3. 运行仿真
+    print("[计算] 运行 Float64 浮点模型...")
+    out_float = cic.process_float(pdm_data)
+    
+    print("[计算] 运行 Int64 定点模型...")
+    out_fixed = cic.process_fixed(pdm_data)
+
+    # 4. 数据后处理与对齐
+    # 将定点数据归一化，以便与浮点数据对比
+    out_fixed_norm = out_fixed / cic.gain
+    out_float_norm = out_float / cic.gain
+    
+    # 去除由于滤波器群延时和建立过程导致的前端不稳定数据
+    cut = CONFIG['cut_head']
+    data_float = out_float_norm[cut:]
+    data_fixed = out_fixed_norm[cut:]
+    
+    # 生成时间轴 (输出采样率)
+    fs_out = CONFIG['fs_in'] / CONFIG['R']
+    t_out = np.arange(len(data_float)) / fs_out
+
+    # 5. 误差分析
+    # 计算 RMSE (Root Mean Square Error)
+    # 这里的 Error 是计算精度误差，即 (Float结果 - Fixed归一化结果)
+    error_signal = data_float - data_fixed
+    rmse_val = calculate_rmse(data_float, data_fixed)
+    max_error = np.max(np.abs(error_signal))
+    
+    print("="*40)
+    print(f"分析结果:")
+    print(f"1. 输出采样率: {fs_out/1000} kHz")
+    print(f"2. 数据点数: {len(data_float)}")
+    print(f"3. RMSE (误差): {rmse_val:.2e}")
+    print(f"4. 最大瞬时误差: {max_error:.2e}")
+    
+    if CONFIG['check_bitwidth']:
+        max_val_fixed = np.max(np.abs(out_fixed))
+        req_bits = np.ceil(np.log2(max_val_fixed + 1)) + 1 # +1 for sign
+        print(f"5. 硬件需求估计: 内部累加器至少需要 {int(req_bits)} bits")
+    print("="*40)
+
+    # 6. 绘图 (Save Only)
+    plt.style.use('seaborn-v0_8-paper')
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), dpi=150, sharex=True)
+    
+    # 子图1：波形对比
+    # 为了看清细节，只画前 5ms (或者根据周期画一部分)
+    plot_len = min(int(fs_out * 0.005), len(t_out)) # 画 5ms
+    
+    ax1.plot(t_out[:plot_len]*1000, data_float[:plot_len], 'k-', lw=1.5, alpha=0.6, label='Float64 (Ideal)')
+    ax1.plot(t_out[:plot_len]*1000, data_fixed[:plot_len], 'r--', lw=1, label='Fixed Point (Norm)')
+    ax1.set_ylabel('Amplitude (Normalized)')
+    ax1.set_title(f'CIC Output Comparison (R={CONFIG["R"]}, N={CONFIG["N"]})')
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.3)
+    
+    # 子图2：误差分析 (全部数据)
+    ax2.plot(t_out*1000, error_signal, color='purple', lw=0.5)
+    ax2.set_ylabel('Error (Float - Fixed)')
+    ax2.set_xlabel('Time (ms)')
+    ax2.set_title(f'Quantization Error Analysis (RMSE = {rmse_val:.2e})')
+    ax2.grid(True, alpha=0.3)
+    
+    # 添加统计框
+    textstr = '\n'.join((
+        f'RMSE: {rmse_val:.2e}',
+        f'Max Err: {max_error:.2e}',
+        f'Output Fs: {fs_out/1000:.1f}kHz'
+    ))
+    props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+    ax2.text(0.95, 0.05, textstr, transform=ax2.transAxes, fontsize=9,
+            verticalalignment='bottom', horizontalalignment='right', bbox=props)
+
+    plt.tight_layout()
+    plt.savefig(CONFIG['output_plot'])
+    print(f"[保存] 分析图表已保存至: {CONFIG['output_plot']}")
+
+if __name__ == "__main__":
+    main()

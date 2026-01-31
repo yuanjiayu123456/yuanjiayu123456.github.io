@@ -1,0 +1,231 @@
+# -*- coding: utf-8 -*-
+"""
+STEP 4 (Revised): IQ 解调与能量提取仿真 (Dynamic & Bit-Exact)
+功能：
+1. [新增] 动态计算 LPF 系数 (基于截止频率)。
+2. [修正] LPF 硬件模型严格对齐图片位宽 (a_coef 为 Q1.14)。
+3. [修正] NCO 逻辑严格对齐图片 (Offset + Threshold)。
+4. 输出 (0,20,20) 格式能量包络。
+"""
+
+import numpy as np
+import scipy.signal as signal
+import matplotlib.pyplot as plt
+import os
+
+# ================= 配置区域 =================
+CONFIG = {
+    'fs': 500000.0,         # 输入采样率 (BPDF 输出)
+    
+    # --- NCO 配置 ---
+    'nco_fc_val': 4,        # 频率控制字 (4/16 * 500k = 125k)
+    
+    # --- LPF 配置 (动态生成) ---
+    'lpf_cutoff': 20000.0,  # 低通截止频率 20kHz (可调!)
+    
+    # --- 抽取配置 ---
+    'decimation': 16,       # 抽取倍数
+    
+    # --- 文件路径 ---
+    'in_file': 'data/data_iir_out.dat',
+    'out_file': 'data/data_iq_out.dat',
+    'plot_file': 'output/step4_iq_demod_result.png'
+}
+# ===========================================
+
+def float_to_fixed(val, total_bits, frac_bits, signed=True):
+    """通用定点转换函数"""
+    scaling = 1 << frac_bits
+    if signed:
+        max_val = (1 << (total_bits - 1)) - 1
+        min_val = -(1 << (total_bits - 1))
+    else:
+        max_val = (1 << total_bits) - 1
+        min_val = 0
+    int_val = int(round(val * scaling))
+    return max(min(int_val, max_val), min_val)
+
+def design_iq_lpf_coeffs(cutoff, fs):
+    """
+    根据截止频率动态生成 LPF 系数
+    硬件结构为 All-Pole (全极点) 结构: y[n] = g*x[n] - a0*y[n-1] - a1*y[n-2]
+    """
+    # 1. 使用 Scipy 设计标准 2阶 Butterworth
+    # output='ba' 返回分子分母系数
+    b, a = signal.butter(2, cutoff, fs=fs, btype='lowpass')
+    
+    # 2. 提取分母系数 (Feedback)
+    # scipy a = [1, a1, a2], 对应方程 y[n] = x - a1*y[n-1] - a2*y[n-2]
+    # 硬件通常使用减法器，所以系数直接取 a[1] 和 a[2] 的正值即可(在代码里做减法)
+    # 或者取负值在代码里做加法。
+    # 观察图片：Adder 处有 '-' 号，说明硬件做减法。
+    # 所以我们传入正的 a[1], a[2]
+    a0_val = a[1]
+    a1_val = a[2]
+    
+    # 3. 计算增益 g
+    # 为了保证 DC (0Hz) 处的增益为 1 (0dB)
+    # H(z=1) = g / (1 + a1 + a2) = 1  =>  g = 1 + a1 + a2
+    g_val = 1.0 + a0_val + a1_val
+    
+    return g_val, a0_val, a1_val
+
+class NCO_Hardware_Model:
+    """
+    严格对齐 IMG20260127193719.jpg
+    Input: Fc_cfg (0,4,0)
+    Internal: 4-bit Accumulator
+    Output: +1/-1
+    """
+    def __init__(self, fc_cfg):
+        self.acc = 0
+        self.fc_cfg = int(fc_cfg)
+        self.nbits = 4
+        self.mod_mask = (1 << self.nbits) - 1
+        # 阈值通常为量程的一半 (8)
+        self.th = 1 << (self.nbits - 1) 
+
+    def step(self):
+        # 1. 累加
+        self.acc = (self.acc + self.fc_cfg) & self.mod_mask
+        
+        # 2. I路生成 (图示: + 1<<(N-2) 即 +4)
+        offset_i = 1 << (self.nbits - 2)
+        idx_i = (self.acc + offset_i) & self.mod_mask
+        lo_i = 1 if idx_i >= self.th else -1
+        
+        # 3. Q路生成 (图示: + 1<<(N-1) 即 +8)
+        offset_q = 1 << (self.nbits - 1)
+        idx_q = (self.acc + offset_q) & self.mod_mask
+        lo_q = 1 if idx_q >= self.th else -1
+        
+        return lo_i, lo_q
+
+class LPF_Hardware_Model:
+    """
+    严格对齐 IMG20260127193456.jpg
+    Input: (1,20,19)
+    Coeffs: G(0,20,20), A(1,16,14)  <-- 注意这里 A 是 14位小数
+    Internal: (1,24,23)
+    """
+    def __init__(self, g, a0, a1):
+        # 量化系数
+        self.g = float_to_fixed(g, 20, 20, signed=False)  # Q0.20
+        self.a0 = float_to_fixed(a0, 16, 14, signed=True) # Q1.14
+        self.a1 = float_to_fixed(a1, 16, 14, signed=True) # Q1.14
+        
+        print(f"[表情] LPF Coeffs (Hardware): G=0x{self.g:X}, A0=0x{self.a0 & 0xFFFF:X}, A1=0x{self.a1 & 0xFFFF:X}")
+        
+        # 状态寄存器 (1,24,23)
+        self.z1 = 0
+        self.z2 = 0
+
+    def process(self, x_int):
+        # x_int (Q1.19)
+        
+        # 1. 前向路径: G(Q0.20) * X(Q1.19) = Q1.39
+        # 对齐到 Q1.23 => 右移 16位 (39-23=16)
+        term_g = (x_int * self.g) >> 16
+        
+        # 2. 反馈路径: A(Q1.14) * Z(Q1.23) = Q2.37
+        # 对齐到 Q1.23 => 右移 14位 (37-23=14)
+        term_a0 = (self.a0 * self.z1) >> 14
+        term_a1 = (self.a1 * self.z2) >> 14
+        
+        # 3. 累加 (图示为减法: + - -)
+        acc = term_g - term_a0 - term_a1
+        
+        # 4. 饱和处理 (Saturation to 24 bits)
+        sat_max = (1 << 23) - 1
+        sat_min = -(1 << 23)
+        acc = max(min(acc, sat_max), sat_min)
+        
+        # 5. 更新状态
+        self.z2 = self.z1
+        self.z1 = acc
+        
+        return acc
+
+def main():
+    if not os.path.exists('data'): os.makedirs('data')
+    if not os.path.exists('output'): os.makedirs('output')
+
+    # 1. 读取 BPDF 输出
+    if not os.path.exists(CONFIG['in_file']):
+        print(f"[表情] 找不到输入文件 {CONFIG['in_file']}，请先运行 Step 3 BPDF。")
+        return
+    bpdf_data_float = np.loadtxt(CONFIG['in_file'])
+    # 转回硬件定点 (Q1.19)
+    bpdf_data_int = (bpdf_data_float * (1 << 19)).astype(np.int64)
+
+    # 2. [动态计算系数]
+    print(f"[表情] 设计 LPF 系数: Cutoff={CONFIG['lpf_cutoff']}Hz, Fs={CONFIG['fs']}Hz")
+    g_val, a0_val, a1_val = design_iq_lpf_coeffs(CONFIG['lpf_cutoff'], CONFIG['fs'])
+    print(f"   Float Coeffs: G={g_val:.4f}, A0={a0_val:.4f}, A1={a1_val:.4f}")
+
+    # 3. 初始化硬件模型
+    nco = NCO_Hardware_Model(CONFIG['nco_fc_val'])
+    lpf_i = LPF_Hardware_Model(g_val, a0_val, a1_val)
+    lpf_q = LPF_Hardware_Model(g_val, a0_val, a1_val) # 两路系数相同
+
+    iq_output_float = []
+    
+    print("[表情] 运行 IQ 硬件仿真 (Mixer -> LPF -> Decim -> Energy)...")
+    
+    # 4. 逐点处理
+    for idx, x_in in enumerate(bpdf_data_int):
+        # --- A. NCO & Mixer ---
+        lo_i, lo_q = nco.step()
+        
+        # 无乘法混频 (Sign Flip)
+        mix_i = x_in if lo_i == 1 else -x_in
+        mix_q = x_in if lo_q == 1 else -x_in
+        
+        # --- B. LPF ---
+        y_i = lpf_i.process(mix_i)
+        y_q = lpf_q.process(mix_q)
+        
+        # --- C. Decimation (16) & Energy ---
+        if idx % CONFIG['decimation'] == 0:
+            # y_i, y_q (Q1.23)
+            
+            # Square: Q1.23 * Q1.23 = Q2.46
+            # 我们需要 Q0.24 (Unsigned) 作为中间结果
+            # Q2.46 >> 22 = Q0.24
+            sq_i = (y_i * y_i) >> 22
+            sq_q = (y_q * y_q) >> 22
+            
+            energy = sq_i + sq_q
+            
+            # Saturation [0, 2^24-1]
+            sat_val = (1 << 24) - 1
+            energy = min(max(energy, 0), sat_val)
+                
+            # Extra Bits [5, 24] -> Extract top 20 bits
+            # (24 downto 5)
+            data_out_int = (energy >> 5) & 0xFFFFF
+            
+            # 转浮点 (Q0.20)
+            iq_output_float.append(data_out_int / (1 << 20))
+
+    # 5. 保存与绘图
+    iq_arr = np.array(iq_output_float)
+    np.savetxt(CONFIG['out_file'], iq_arr, fmt='%.8f')
+    
+    plt.style.use('seaborn-v0_8-paper')
+    plt.figure(figsize=(10, 5), dpi=150)
+    
+    t = np.arange(len(iq_arr)) / (CONFIG['fs'] / CONFIG['decimation']) * 1000 # ms
+    plt.plot(t, iq_arr, color='#ff7f0e', lw=1.5, label='Energy Envelope')
+    
+    plt.title(f"IQ Output (Cutoff={CONFIG['lpf_cutoff']}Hz)\nFormat: (0,20,20)", fontweight='bold')
+    plt.xlabel('Time (ms)')
+    plt.ylabel('Amplitude')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(CONFIG['plot_file'])
+    print(f"[表情] 完成。结果已保存: {CONFIG['plot_file']}")
+
+if __name__ == "__main__":
+    main()

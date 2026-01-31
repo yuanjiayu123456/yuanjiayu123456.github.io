@@ -1,0 +1,140 @@
+# -*- coding: utf-8 -*-
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+# ==========================================
+# 配置区域
+# ==========================================
+CONFIG = {
+    'fs': 31250.0,
+    'in_file': 'data/data_iq_out.dat',   # 输入文件路径
+    'out_file': 'data/data_hpf_out.dat', # 输出文件路径
+    'plot_file': 'output/step5_dc_latch_delayed.png',
+    
+    # 1. 跳过时间 (Skip)
+    # 忽略前 64 个点 (约 2ms)，等待硬件上电稳定或瞬态结束
+    'skip_len': 64, 
+    
+    # 2. 锁定时间 (Latch/Measure)
+    # 跳过之后，利用接下来的 64 个点计算平均 DC 值
+    'latch_len': 64 
+}
+
+class DC_Latch_Hardware:
+    """
+    硬件行为模拟：
+    1. Wait/Skip: 启动后先等待一段时间，不采样。
+    2. Calibrate: 开始累加计算平均值。
+    3. Run: 锁定平均值，执行减法。
+    """
+    def __init__(self, skip_len, latch_len):
+        self.skip_len = skip_len    # 跳过点数
+        self.latch_len = latch_len  # 采样点数
+        self.counter = 0            # 全局计数器
+        self.accumulator = 0.0      # 累加器
+        self.locked_dc = 0.0        # 锁定的 DC 值
+        self.calibrated = False     # 状态标志
+
+    def process(self, x_float):
+        # 阶段 1: 等待/跳过阶段 (Wait / Skip)
+        if self.counter < self.skip_len:
+            self.counter += 1
+            # 在跳过阶段，通常输出 Mute (0) 或者 bypass，这里选择 Mute
+            return 0.0 
+            
+        # 阶段 2: 校准阶段 (Calibration / Accumulate)
+        # 只有过了 skip_len 之后才开始累加
+        elif self.counter < (self.skip_len + self.latch_len):
+            self.accumulator += x_float
+            self.counter += 1
+            
+            # 判断是否刚好收集满 latch_len 个点
+            if self.counter == (self.skip_len + self.latch_len):
+                # 计算平均值并锁定
+                self.locked_dc = self.accumulator / self.latch_len
+                print(f"[表情] 硬件校准完成 (Skip {self.skip_len} + Latch {self.latch_len}): Locked DC = {self.locked_dc:.8f}")
+                self.calibrated = True
+            
+            # 校准期间建议 Mute，防止输出不稳定的直流跳变
+            return 0.0 
+            
+        # 阶段 3: 锁定工作阶段 (Operation)
+        else:
+            # 此时 locked_dc 已经固定，不再变化
+            # 这是一个纯减法操作，没有任何滤波器带来的相位畸变
+            out = x_float - self.locked_dc
+            return out
+
+def main():
+    # 简单的文件检查
+    if not os.path.exists(CONFIG['in_file']):
+        print(f"Warning: {CONFIG['in_file']} not found. Generating dummy data for demonstration.")
+        # 生成模拟数据：前100个点是乱序噪音，后面是带直流偏置的正弦波
+        t = np.arange(1000)
+        dummy_noise = np.random.normal(0, 0.1, 100) + 0.5 # 瞬态噪音
+        dummy_signal = np.sin(2 * np.pi * t[100:] / 50) + 2.5 # 稳定信号 DC=2.5
+        iq_data = np.concatenate([dummy_noise, dummy_signal])
+    else:
+        iq_data = np.loadtxt(CONFIG['in_file'])
+    
+    # 初始化传入 skip 和 latch 参数
+    dc_remover = DC_Latch_Hardware(CONFIG['skip_len'], CONFIG['latch_len'])
+    
+    out_data = []
+    for val in iq_data:
+        out_data.append(dc_remover.process(val))
+    out_data = np.array(out_data)
+    out_data = (out_data  * (1 <<12)).astype(np.float64)
+    # 保存数据
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(CONFIG['out_file']), exist_ok=True)
+    np.savetxt(CONFIG['out_file'], out_data, fmt='%.8f')
+
+    # ==========================================
+    # 绘图部分
+    # ==========================================
+    try:
+        plt.style.use('seaborn-v0_8-paper')
+    except:
+        plt.style.use('ggplot') # Fallback style
+
+    fig, ax = plt.subplots(2, 1, figsize=(10, 8), dpi=150)
+    
+    # 图1: 原始输入
+    ax[0].plot(iq_data, 'orange', label='Input (Raw)')
+    
+    # 画出 Skip 和 Latch 的区域示意
+    # 灰色区域：Skip
+    ax[0].axvspan(0, CONFIG['skip_len'], color='gray', alpha=0.3, label='Skip Phase (Ignored)')
+    # 绿色区域：Latch (Calibration)
+    ax[0].axvspan(CONFIG['skip_len'], CONFIG['skip_len'] + CONFIG['latch_len'], color='green', alpha=0.2, label='Latch Phase (Measure DC)')
+    
+    ax[0].legend(loc='upper right')
+    ax[0].set_title(f'Input Signal Processing Phases (Skip={CONFIG["skip_len"]}, Latch={CONFIG["latch_len"]})')
+    ax[0].set_ylabel('Amplitude')
+    
+    # 图2: 处理后输出
+    ax[1].plot(out_data, '#1f77b4', lw=1.5, label='Output (DC Removed)')
+    ax[1].set_title('Output via "Delayed Latch" (Start -> Skip -> Measure -> Lock)')
+    ax[1].axhline(0, color='black', alpha=0.3)
+    ax[1].set_ylabel('Amplitude')
+    ax[1].grid(True, alpha=0.3)
+    
+    # 标注真正开始输出的时间点
+    start_output_idx = CONFIG['skip_len'] + CONFIG['latch_len']
+    ax[1].axvline(start_output_idx, color='red', linestyle='--', alpha=0.5)
+    
+    # 动态调整文本位置
+    y_pos = np.max(out_data) * 0.8 if len(out_data) > 0 else 0
+    #ax[1].text(start_output_idx + 10, y_pos, "Output Enabled Here ->", color='red', fontweight='bold')
+    ax[1].set_xlim(100,900)
+    plt.tight_layout()
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(CONFIG['plot_file']), exist_ok=True)
+    plt.savefig(CONFIG['plot_file'])
+    print(f"[表情] Plot saved to: {CONFIG['plot_file']}")
+
+if __name__ == "__main__":
+    main()

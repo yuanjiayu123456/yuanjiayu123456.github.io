@@ -1,0 +1,140 @@
+# -*- coding: utf-8 -*-
+"""
+STEP 5 (Real Data Diagnosis): 真实数据诊断
+功能：读取 data_iq_out.dat，对比 "理想去直流" 与 "硬件FIR" 的波形差异。
+"""
+import numpy as np
+import scipy.signal as signal
+import matplotlib.pyplot as plt
+import os
+
+# ================= 配置 =================
+CONFIG = {
+    'fs': 31250.0,
+    'taps': 27,
+    # 你现在的设置 (1000Hz). 
+    # 实验：你可以待会儿把这里改成 200.0，再跑一次看区别
+    'cutoff': 500.0, 
+    'dlen':32,
+    
+    'in_file': 'data/data_iq_out.dat',
+    'plot_file': 'output/step5_real_data_diagnosis.png',
+    'out_file': 'data/data_hpf_out.dat',
+
+}
+
+# ================= 硬件模型 (和你现在的代码一致) =================
+def float_to_fixed(val, total_bits, frac_bits, signed=True):
+    scaling = 1 << frac_bits
+    if signed:
+        max_val = (1 << (total_bits - 1)) - 1
+        min_val = -(1 << (total_bits - 1))
+    else:
+        max_val = (1 << total_bits) - 1
+        min_val = 0
+    int_val = int(round(val * scaling))
+    return max(min(int_val, max_val), min_val)
+
+class HPF_Hardware_Model:
+    def __init__(self, coeffs, dlen):
+        self.dlen = dlen
+        self.counter = 0
+        # Q1.14 系数
+        self.coeffs_int = [float_to_fixed(c, 15, 14, signed=True) for c in coeffs]
+        # 强制归零
+        mid = len(self.coeffs_int)//2
+        self.coeffs_int[mid] -= sum(self.coeffs_int)
+        
+        self.buffer = [0] * len(coeffs)
+
+    def process(self, x_float):
+        # Q1.19 输入
+        x_int = float_to_fixed(x_float, 20, 20, signed=False)
+        
+        # Warm-up Logic (Fix)
+        self.buffer.pop()
+        self.buffer.insert(0, x_int)
+        
+        acc = 0
+        for i in range(len(self.buffer)):
+            acc += self.buffer[i] * self.coeffs_int[i]
+            
+        # Q1.34 -> Q1.19
+        out_int = acc >> 15
+        
+        # Saturation
+        sat_max = (1 << 19) - 1
+        sat_min = -(1 << 19)
+        if out_int > sat_max: out_int = sat_max
+        elif out_int < sat_min: out_int = sat_min
+        
+        val = out_int / (1 << 19)
+        
+        if self.counter < self.dlen:
+            self.counter += 1
+            return 0.0
+        return val
+
+# ================= 主程序 =================
+def main():
+    if not os.path.exists(CONFIG['in_file']):
+        print(f"[表情] 没找到 {CONFIG['in_file']}，请确认文件路径！")
+        return
+
+    # 1. 读取你的真实 IQ 数据
+    iq_data = np.loadtxt(CONFIG['in_file'])
+    print(f"[表情] 读取数据: {len(iq_data)} 点")
+
+    # 2. 计算【理想真值】(Golden)
+    # 也就是你心里想要的：完美的减去直流，保留原始形状
+    # 我们取前 200 个点的平均值作为估算的 DC
+    estimated_dc = np.mean(iq_data[:1000])
+    golden_out = iq_data - estimated_dc
+    # 模拟 Mute 区域以便对其
+    golden_out[:CONFIG['dlen']] = 0
+    # np.savetxt(CONFIG['out_file'], golden_out, fmt='%.8f')
+    # 3. 计算【硬件结果】(Hardware)
+    coeffs = signal.firwin(CONFIG['taps'], CONFIG['cutoff'], fs=CONFIG['fs'], pass_zero=False, window='hamming')
+    hpf = HPF_Hardware_Model(coeffs, CONFIG['dlen'])
+    
+    hw_out = []
+    for val in iq_data:
+        hw_out.append(hpf.process(val))
+    hw_out = np.array(hw_out)
+    hw_out = (hw_out  * (1 <<12)).astype(np.float64)
+
+    np.savetxt(CONFIG['out_file'], hw_out, fmt='%.8f')
+
+    # 4. 绘图诊断
+    plt.style.use('seaborn-v0_8-paper')
+    fig, ax = plt.subplots(2, 1, figsize=(10, 8), dpi=150)
+
+    # 图1: 全局视图
+    ax[0].plot(golden_out, 'green', lw=2, alpha=0.5, label='Ideal (Signal - DC)')
+    ax[0].plot(hw_out, 'red', lw=1, label='Hardware FIR Output')
+    ax[0].set_title('Global View: Ideal vs Hardware')
+    ax[0].legend()
+    ax[0].set_xlim(1250,1500)
+    ax[0].grid(True, alpha=0.3)
+
+    # 图2: 放大看开头 (Preamble + EQ)
+    # 重点看 EQ 那一段长低电平
+    zoom_end = min(300, len(iq_data))
+    ax[1].plot(golden_out[:zoom_end], 'green', lw=2, alpha=0.5, label='Ideal Shape')
+    ax[1].plot(hw_out[:zoom_end], 'red', lw=1.5, label='Hardware Shape')
+    
+    ax[1].set_title(f'Zoomed View: The "Distortion" (Cutoff={CONFIG["cutoff"]}Hz)')
+    ax[1].legend()
+    ax[1].grid(True, alpha=0.3)
+
+    # 加上文字说明
+    #ax[1].text(60, -0.0001, "Look at the slope here!", color='blue', fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig(CONFIG['plot_file'])
+    print(f"[表情] 诊断图已生成: {CONFIG['plot_file']}")
+    print("[表情] 请打开图片，红色线就是你现在的硬件输出，绿色线是你想要的理想波形。")
+    print("[表情] 红色线的倾斜程度，就是 FIR 滤波器造成的物理畸变。")
+
+if __name__ == "__main__":
+    main()
